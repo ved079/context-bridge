@@ -187,75 +187,8 @@
       (apiData.chat && apiData.chat.model) ||
       "GLM";
 
-    // Find all message wrapper groups (parent containers).
-    // Tailwind arbitrary-value classes like max-w-[1000px] contain brackets which
-    // are special characters in CSS selectors and throw even when escaped.
-    // Use a JS .filter() on a broader selector instead.
-    const wrappers = Array.from(document.querySelectorAll('div.group.rounded-lg'))
-      .filter(el => {
-        const cls = el.className;
-        return cls.includes('flex-col') &&
-               cls.includes('justify-between') &&
-               cls.includes('max-w-') &&
-               cls.includes('mx-auto') &&
-               !cls.includes('messageInputContainer');
-      });
-
-    console.log(`[CB] Z.ai DOM: Found ${wrappers.length} message wrapper groups`);
-
-    if (wrappers.length === 0) {
-      // Fallback: try broader selectors
-      return scrapeFromDOMFallback(title, model, apiData);
-    }
-
-    const messages = [];
-
-    for (const wrapper of wrappers) {
-      const children = wrapper.children;
-      for (let i = 0; i < children.length; i++) {
-        const child = children[i];
-
-        // Skip non-div elements (text nodes, etc.)
-        if (child.tagName !== "DIV") continue;
-
-        // Skip the input container at the bottom
-        if (child.classList.contains("messageInputContainer") ||
-            child.querySelector(".messageInputContainer")) continue;
-
-        // Skip elements that are just UI chrome (action bars, empty divs)
-        const textLen = (child.innerText || "").trim().length;
-        if (textLen < 2) continue;
-
-        // Determine role
-        const isUser = child.classList.contains("user-message");
-        const role = isUser ? "user" : "assistant";
-
-        // Extract text content
-        const content = extractZaiDOMContent(child, role);
-        if (!content || content.trim().length < 2) continue;
-
-        messages.push({
-          role,
-          content: content.trim(),
-          timestamp: null // DOM doesn't provide reliable timestamps for z.ai
-        });
-      }
-    }
-
-    console.log(`[CB] Z.ai DOM: Extracted ${messages.length} messages from wrappers`);
-
-    if (messages.length >= 2) {
-      return {
-        title,
-        model,
-        messages,
-        platform: "zai",
-        exportTimestamp: new Date().toISOString(),
-        messageSource: "DOM scraping (API lazy-load fallback)"
-      };
-    }
-
-    // Wrappers didn't work — try broader approach
+    // The wrapper-parent approach is unreliable — z.ai's DOM is a flat sibling list,
+    // not messages nested inside a parent wrapper. Go straight to the sibling walker.
     return scrapeFromDOMFallback(title, model, apiData);
   }
 
