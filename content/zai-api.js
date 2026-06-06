@@ -140,20 +140,25 @@
   function parseConversation(apiData) {
     const result = parseConversationAPI(apiData);
 
-    // Check if API returned mostly empty messages (z.ai lazy-loads content)
-    // If <50% of total nodes have content, the API data is incomplete — fall back to DOM
-    if (result.rawNodeCount > 2 && result._withContent < result.rawNodeCount * 0.5) {
+    // z.ai lazy-loads content — the API skeleton is almost always incomplete.
+    // Always attempt DOM scraping and use whichever source gives MORE messages.
+    // DOM scraping captures the full visible conversation regardless of API gaps.
+    console.log(
+      `[CB] Z.ai: API gave ${result._withContent}/${result.rawNodeCount} messages with content — ` +
+      `also trying DOM scraping to compare`
+    );
+    const domResult = scrapeFromDOM(apiData);
+
+    if (domResult.messages.length > result.messages.length) {
       console.log(
-        `[CB] Z.ai: API returned ${result._withContent}/${result.rawNodeCount} messages with content ` +
-        `(${Math.round(result._withContent / result.rawNodeCount * 100)}%) — falling back to DOM scraping`
+        `[CB] Z.ai: DOM (${domResult.messages.length} msgs) > API (${result.messages.length} msgs) — using DOM`
       );
-      const domResult = scrapeFromDOM(apiData);
-      if (domResult.messages.length >= 2) {
-        return domResult;
-      }
-      console.log("[CB] Z.ai: DOM scraping found fewer messages than API, keeping API result.");
+      return domResult;
     }
 
+    console.log(
+      `[CB] Z.ai: API (${result.messages.length} msgs) >= DOM (${domResult.messages.length} msgs) — using API`
+    );
     return result;
   }
 
@@ -365,7 +370,11 @@
   function scrapeFromDOMFallback(title, model, apiData) {
     console.log("[CB] Z.ai DOM: Trying broader selectors...");
 
-    // Strategy: Find all user-message divs and all potential assistant message divs
+    // z.ai DOM is a flat list of siblings — user messages have class "user-message",
+    // assistant messages are all other divs between two user-message divs.
+    // We collect ALL siblings between consecutive user messages so we don't miss
+    // multi-block assistant responses (Thought Process + tool calls + response text).
+
     const userMsgs = document.querySelectorAll("div.user-message");
     console.log(`[CB] Z.ai DOM: Found ${userMsgs.length} user-message divs`);
 
@@ -381,30 +390,48 @@
       };
     }
 
-    // For each user message, find the next sibling that looks like an assistant response
     const messages = [];
     const allUserMsgs = Array.from(userMsgs);
 
-    for (const userEl of allUserMsgs) {
-      const userText = userEl.innerText || userEl.textContent || "";
-      if (userText.trim()) {
-        messages.push({ role: "user", content: userText.trim(), timestamp: null });
+    for (let u = 0; u < allUserMsgs.length; u++) {
+      const userEl = allUserMsgs[u];
+      const nextUserEl = allUserMsgs[u + 1] || null;
+
+      // Add the user message
+      const userText = (userEl.innerText || userEl.textContent || "").trim();
+      if (userText) {
+        messages.push({ role: "user", content: userText, timestamp: null });
       }
 
-      // Look for the next assistant message after this user message
-      // Walk forward through siblings
+      // Collect ALL siblings between this user message and the next one.
+      // This captures every block of the assistant response (thinking, tool calls, text).
+      const assistantParts = [];
       let sibling = userEl.nextElementSibling;
       while (sibling) {
-        if (sibling.classList.contains("messageInputContainer")) break;
-        if (sibling.classList.contains("user-message")) break; // Hit the next user message
+        // Stop at the input box or the next user turn
+        if (sibling.classList.contains("messageInputContainer") ||
+            sibling.querySelector(".messageInputContainer")) break;
+        if (sibling === nextUserEl) break;
+        if (sibling.classList.contains("user-message")) break;
 
-        const sibText = sibling.innerText || sibling.textContent || "";
-        if (sibText.trim().length > 5) {
-          // This is likely the assistant response
-          messages.push({ role: "assistant", content: sibText.trim(), timestamp: null });
-          break;
+        const sibText = (sibling.innerText || sibling.textContent || "").trim();
+        if (sibText.length > 5) {
+          // Skip pure "Thought Process" header divs (they're just a label, content is inside)
+          const isThoughtHeader = sibText === "Thought Process" && sibling.children.length <= 1;
+          if (!isThoughtHeader) {
+            assistantParts.push(extractZaiDOMContent(sibling, "assistant") || sibText);
+          }
         }
         sibling = sibling.nextElementSibling;
+      }
+
+      if (assistantParts.length > 0) {
+        // Join all assistant blocks into one cohesive message
+        messages.push({
+          role: "assistant",
+          content: assistantParts.filter(Boolean).join("\n\n").trim(),
+          timestamp: null
+        });
       }
     }
 
