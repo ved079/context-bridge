@@ -420,8 +420,6 @@
         if (sibling === nextWrapper) break;
         if (sibling.classList.contains("messageInputContainer") ||
             sibling.querySelector(".messageInputContainer")) break;
-        // If we hit another wrapper unexpectedly, stop
-        if (sibling.querySelector("div.user-message")) break;
 
         const sibText = (sibling.innerText || sibling.textContent || "").trim();
         if (sibText.length > 5) {
