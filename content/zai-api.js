@@ -100,7 +100,7 @@
   // the DOM to stabilise so every message is rendered and scrapeable.
 
   async function scrollToTopAndWait() {
-    // Find the scrollable chat container
+    // Find the scrollable chat container — try multiple selectors
     const container =
       document.querySelector("#chat-messages-container") ||
       document.querySelector("[id*='chat'][class*='overflow']") ||
@@ -113,49 +113,42 @@
       return;
     }
 
-    const originalScrollTop = container.scrollTop;
+    console.log(`[CB] Z.ai: Scrolling to top (currently at ${container.scrollTop}px)...`);
 
-    // If already at top, nothing to do
-    if (originalScrollTop === 0) {
-      console.log("[CB] Z.ai: Already at top");
-      return;
-    }
+    // Scroll to top — use instant to avoid smooth scroll being interrupted
+    container.scrollTo({ top: 0, behavior: "instant" });
 
-    console.log(`[CB] Z.ai: Scrolling to top (was at ${originalScrollTop}px)...`);
+    // z.ai virtualises the message list. As we scroll up, old messages enter the DOM
+    // but new messages (at the bottom) may get removed — so node count is unreliable.
+    // Instead: poll scrollTop until it reads 0 AND is stable, then wait an extra
+    // render cycle for the virtual list to finish loading top messages.
+    await new Promise(resolve => {
+      let atTopFor = 0;
 
-    return new Promise(resolve => {
-      let lastNodeCount = document.querySelectorAll("div.user-message").length;
-      let stableCount = 0;
-
-      container.scrollTo({ top: 0, behavior: "smooth" });
-
-      // Poll until the node count stabilises (no new messages loading)
       const poll = setInterval(() => {
-        const count = document.querySelectorAll("div.user-message").length;
-        if (count === lastNodeCount) {
-          stableCount++;
-          if (stableCount >= 4) { // stable for ~400ms
-            clearInterval(poll);
-            console.log(`[CB] Z.ai: DOM stable — ${count} user messages visible`);
-            resolve();
-          }
+        // Keep nudging to top in case the virtual list resists
+        if (container.scrollTop > 0) {
+          container.scrollTo({ top: 0, behavior: "instant" });
+          atTopFor = 0;
         } else {
-          lastNodeCount = count;
-          stableCount = 0;
-          // Keep scrolling to top if we're not there yet
-          if (container.scrollTop > 0) {
-            container.scrollTo({ top: 0, behavior: "instant" });
+          atTopFor++;
+          if (atTopFor >= 6) { // at scrollTop=0 for 600ms
+            clearInterval(poll);
+            resolve();
           }
         }
       }, 100);
 
-      // Hard timeout at 8 seconds — proceed regardless
       setTimeout(() => {
         clearInterval(poll);
-        console.log("[CB] Z.ai: Scroll timeout — proceeding with whatever is rendered");
+        console.log("[CB] Z.ai: Scroll timeout — proceeding");
         resolve();
       }, 8000);
     });
+
+    // Extra wait for virtual list to render the now-visible top messages
+    await new Promise(r => setTimeout(r, 600));
+    console.log(`[CB] Z.ai: Ready — ${document.querySelectorAll("div.user-message").length} user messages in DOM`);
   }
 
   async function fetchConversation() {
