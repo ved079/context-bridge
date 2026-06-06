@@ -100,62 +100,69 @@
   // the DOM to stabilise so every message is rendered and scrapeable.
 
   async function scrollToTopAndWait() {
-    // Find ALL scrollable elements on the page and scroll them to top.
-    // We can't know which one is the chat container without DevTools access,
-    // so we blast all of them — the right one will scroll.
-    const scrollables = Array.from(document.querySelectorAll("*")).filter(el => {
-      if (el === document.body || el === document.documentElement) return false;
-      const style = window.getComputedStyle(el);
-      const overflowY = style.overflowY;
-      const canScroll = (overflowY === "auto" || overflowY === "scroll") && el.scrollHeight > el.clientHeight;
-      return canScroll && el.scrollTop > 0;
-    });
+    // Find ALL scrollable elements on the page (excluding body/html).
+    // We blast all of them since we don't know which is the chat container.
+    function getScrollables() {
+      return Array.from(document.querySelectorAll("*")).filter(el => {
+        if (el === document.body || el === document.documentElement) return false;
+        const oy = window.getComputedStyle(el).overflowY;
+        return (oy === "auto" || oy === "scroll") && el.scrollHeight > el.clientHeight;
+      });
+    }
+
+    const scrollables = getScrollables();
 
     if (scrollables.length === 0) {
-      // Also try window scroll
       window.scrollTo({ top: 0, behavior: "instant" });
-      console.log("[CB] Z.ai: No scrolled containers found — tried window");
-      await new Promise(r => setTimeout(r, 800));
+      console.log("[CB] Z.ai: No scrollable containers — tried window scroll");
+      await new Promise(r => setTimeout(r, 1000));
       return;
     }
 
-    console.log(`[CB] Z.ai: Found ${scrollables.length} scrollable container(s) — scrolling all to top`);
+    console.log(`[CB] Z.ai: Found ${scrollables.length} scrollable container(s)`);
+
+    // Scroll all to top immediately
     scrollables.forEach(el => el.scrollTo({ top: 0, behavior: "instant" }));
 
-    // Poll until all are at top
+    // Now wait — not with a fixed timeout, but until the user-message count
+    // stops growing. z.ai's virtual list loads messages in batches as we reach
+    // the top; we keep waiting as long as new messages keep appearing.
     await new Promise(resolve => {
+      let lastCount = document.querySelectorAll("div.user-message").length;
       let stableFor = 0;
+      const MAX_WAIT = 30000; // 30s hard cap — handles very long chats
+      const start = Date.now();
+
       const poll = setInterval(() => {
+        // Keep everything scrolled to top on every tick
         scrollables.forEach(el => {
           if (el.scrollTop > 0) el.scrollTo({ top: 0, behavior: "instant" });
         });
-        const allAtTop = scrollables.every(el => el.scrollTop === 0);
-        if (allAtTop) {
+
+        const count = document.querySelectorAll("div.user-message").length;
+
+        if (count > lastCount) {
+          // New messages loaded — reset stable counter, keep waiting
+          console.log(`[CB] Z.ai: ${count} user messages (was ${lastCount}) — still loading...`);
+          lastCount = count;
+          stableFor = 0;
+        } else {
           stableFor++;
-          if (stableFor >= 5) { // 500ms stable at top
+          // Stable for 2s at top = done
+          if (stableFor >= 20) {
             clearInterval(poll);
+            console.log(`[CB] Z.ai: Stable at ${count} user messages after ${((Date.now()-start)/1000).toFixed(1)}s`);
             resolve();
           }
-        } else {
-          stableFor = 0;
+        }
+
+        if (Date.now() - start > MAX_WAIT) {
+          clearInterval(poll);
+          console.log(`[CB] Z.ai: Hit 30s cap — proceeding with ${lastCount} user messages`);
+          resolve();
         }
       }, 100);
-
-      setTimeout(() => { clearInterval(poll); resolve(); }, 8000);
     });
-
-    // Wait for virtual list to render newly visible top messages.
-    // Do two passes — the first scroll loads most messages, the second catches
-    // any stragglers the virtual list loads lazily after the initial render.
-    await new Promise(r => setTimeout(r, 1200));
-
-    // Second pass — re-scroll anything that drifted
-    scrollables.forEach(el => {
-      if (el.scrollTop > 0) el.scrollTo({ top: 0, behavior: "instant" });
-    });
-    await new Promise(r => setTimeout(r, 1200));
-
-    console.log(`[CB] Z.ai: Ready — ${document.querySelectorAll("div.user-message").length} user messages in DOM`);
   }
 
   async function fetchConversation() {
