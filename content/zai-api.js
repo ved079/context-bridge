@@ -144,8 +144,17 @@
       setTimeout(() => { clearInterval(poll); resolve(); }, 8000);
     });
 
-    // Wait for virtual list to render newly visible top messages
-    await new Promise(r => setTimeout(r, 800));
+    // Wait for virtual list to render newly visible top messages.
+    // Do two passes — the first scroll loads most messages, the second catches
+    // any stragglers the virtual list loads lazily after the initial render.
+    await new Promise(r => setTimeout(r, 1200));
+
+    // Second pass — re-scroll anything that drifted
+    scrollables.forEach(el => {
+      if (el.scrollTop > 0) el.scrollTo({ top: 0, behavior: "instant" });
+    });
+    await new Promise(r => setTimeout(r, 1200));
+
     console.log(`[CB] Z.ai: Ready — ${document.querySelectorAll("div.user-message").length} user messages in DOM`);
   }
 
