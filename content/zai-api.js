@@ -184,7 +184,7 @@
 
     // Find all message wrapper groups (parent containers)
     const wrappers = document.querySelectorAll(
-      '.flex.flex-col.justify-between.px-5.mb-3.w-full.max-w-\[1000px\].mx-auto.rounded-lg.group'
+      '.flex.flex-col.justify-between.px-5.mb-3.w-full.max-w-\\[1000px\\].mx-auto.rounded-lg.group'
     );
 
     console.log(`[CB] Z.ai DOM: Found ${wrappers.length} message wrapper groups`);
