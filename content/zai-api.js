@@ -94,6 +94,70 @@
 
   /* ── Fetch Conversation ─────────────────────────────────── */
 
+  /* ── Scroll to top so z.ai renders all messages in DOM ── */
+  // z.ai virtualises its message list — only visible messages exist in the DOM.
+  // Before scraping we scroll the chat container to the very top and wait for
+  // the DOM to stabilise so every message is rendered and scrapeable.
+
+  async function scrollToTopAndWait() {
+    // Find the scrollable chat container
+    const container =
+      document.querySelector("#chat-messages-container") ||
+      document.querySelector("[id*='chat'][class*='overflow']") ||
+      document.querySelector("main .overflow-y-auto") ||
+      document.querySelector(".overflow-y-auto") ||
+      document.querySelector("main");
+
+    if (!container) {
+      console.log("[CB] Z.ai: No scroll container found — skipping scroll");
+      return;
+    }
+
+    const originalScrollTop = container.scrollTop;
+
+    // If already at top, nothing to do
+    if (originalScrollTop === 0) {
+      console.log("[CB] Z.ai: Already at top");
+      return;
+    }
+
+    console.log(`[CB] Z.ai: Scrolling to top (was at ${originalScrollTop}px)...`);
+
+    return new Promise(resolve => {
+      let lastNodeCount = document.querySelectorAll("div.user-message").length;
+      let stableCount = 0;
+
+      container.scrollTo({ top: 0, behavior: "smooth" });
+
+      // Poll until the node count stabilises (no new messages loading)
+      const poll = setInterval(() => {
+        const count = document.querySelectorAll("div.user-message").length;
+        if (count === lastNodeCount) {
+          stableCount++;
+          if (stableCount >= 4) { // stable for ~400ms
+            clearInterval(poll);
+            console.log(`[CB] Z.ai: DOM stable — ${count} user messages visible`);
+            resolve();
+          }
+        } else {
+          lastNodeCount = count;
+          stableCount = 0;
+          // Keep scrolling to top if we're not there yet
+          if (container.scrollTop > 0) {
+            container.scrollTo({ top: 0, behavior: "instant" });
+          }
+        }
+      }, 100);
+
+      // Hard timeout at 8 seconds — proceed regardless
+      setTimeout(() => {
+        clearInterval(poll);
+        console.log("[CB] Z.ai: Scroll timeout — proceeding with whatever is rendered");
+        resolve();
+      }, 8000);
+    });
+  }
+
   async function fetchConversation() {
     const convId = CBCommon.getConversationId();
     if (!convId) {
@@ -590,7 +654,8 @@
         return false;
 
       case "scrape":
-        fetchConversation()
+        scrollToTopAndWait()
+          .then(() => fetchConversation())
           .then(apiData => {
             const parsed = parseConversation(apiData);
             sendResponse({ ok: true, data: parsed });
