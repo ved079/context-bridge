@@ -182,10 +182,19 @@
       (apiData.chat && apiData.chat.model) ||
       "GLM";
 
-    // Find all message wrapper groups (parent containers)
-    const wrappers = document.querySelectorAll(
-      '.flex.flex-col.justify-between.px-5.mb-3.w-full.max-w-\\[1000px\\].mx-auto.rounded-lg.group'
-    );
+    // Find all message wrapper groups (parent containers).
+    // Tailwind arbitrary-value classes like max-w-[1000px] contain brackets which
+    // are special characters in CSS selectors and throw even when escaped.
+    // Use a JS .filter() on a broader selector instead.
+    const wrappers = Array.from(document.querySelectorAll('div.group.rounded-lg'))
+      .filter(el => {
+        const cls = el.className;
+        return cls.includes('flex-col') &&
+               cls.includes('justify-between') &&
+               cls.includes('max-w-') &&
+               cls.includes('mx-auto') &&
+               !cls.includes('messageInputContainer');
+      });
 
     console.log(`[CB] Z.ai DOM: Found ${wrappers.length} message wrapper groups`);
 
