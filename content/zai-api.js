@@ -301,12 +301,19 @@
   /* ── Broader DOM fallback for z.ai ─────────────────────── */
 
   function scrapeFromDOMFallback(title, model, apiData) {
-    console.log("[CB] Z.ai DOM: Trying broader selectors...");
+    console.log("[CB] Z.ai DOM: Scraping from DOM...");
 
-    // z.ai DOM is a flat list of siblings — user messages have class "user-message",
-    // assistant messages are all other divs between two user-message divs.
-    // We collect ALL siblings between consecutive user messages so we don't miss
-    // multi-block assistant responses (Thought Process + tool calls + response text).
+    // Confirmed z.ai DOM structure (from DevTools):
+    //
+    //   div.group.rounded-lg   ← wrapper (has ONE user-message inside)
+    //     └── div.user-message ← user turn
+    //   div.???                ← assistant turn (sibling of the WRAPPER, not of user-message)
+    //   div.group.rounded-lg   ← next wrapper
+    //     └── div.user-message ← next user turn
+    //   ...
+    //   div.messageInputContainer ← input box, stop here
+    //
+    // So: for each user-message, walk the WRAPPER's next siblings to find assistant content.
 
     const userMsgs = document.querySelectorAll("div.user-message");
     console.log(`[CB] Z.ai DOM: Found ${userMsgs.length} user-message divs`);
@@ -336,20 +343,24 @@
         messages.push({ role: "user", content: userText, timestamp: null });
       }
 
-      // Collect ALL siblings between this user message and the next one.
-      // This captures every block of the assistant response (thinking, tool calls, text).
+      // The assistant response is a sibling of the WRAPPER (userEl.parentElement),
+      // not a sibling of userEl itself. Walk from wrapper's next sibling forward
+      // until we hit the next wrapper or the input box.
+      const wrapper = userEl.parentElement;
+      const nextWrapper = nextUserEl ? nextUserEl.parentElement : null;
+
       const assistantParts = [];
-      let sibling = userEl.nextElementSibling;
+      let sibling = wrapper ? wrapper.nextElementSibling : null;
+
       while (sibling) {
-        // Stop at the input box or the next user turn
+        if (sibling === nextWrapper) break;
         if (sibling.classList.contains("messageInputContainer") ||
             sibling.querySelector(".messageInputContainer")) break;
-        if (sibling === nextUserEl) break;
-        if (sibling.classList.contains("user-message")) break;
+        // If we hit another wrapper unexpectedly, stop
+        if (sibling.querySelector("div.user-message")) break;
 
         const sibText = (sibling.innerText || sibling.textContent || "").trim();
         if (sibText.length > 5) {
-          // Skip pure "Thought Process" header divs (they're just a label, content is inside)
           const isThoughtHeader = sibText === "Thought Process" && sibling.children.length <= 1;
           if (!isThoughtHeader) {
             assistantParts.push(extractZaiDOMContent(sibling, "assistant") || sibText);
@@ -359,7 +370,6 @@
       }
 
       if (assistantParts.length > 0) {
-        // Join all assistant blocks into one cohesive message
         messages.push({
           role: "assistant",
           content: assistantParts.filter(Boolean).join("\n\n").trim(),
@@ -368,7 +378,7 @@
       }
     }
 
-    console.log(`[CB] Z.ai DOM: Fallback extracted ${messages.length} messages`);
+    console.log(`[CB] Z.ai DOM: Extracted ${messages.length} messages`);
 
     return {
       title,
@@ -376,7 +386,7 @@
       messages,
       platform: "zai",
       exportTimestamp: new Date().toISOString(),
-      messageSource: "DOM sibling fallback"
+      messageSource: "DOM scraping"
     };
   }
 
