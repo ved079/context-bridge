@@ -1,14 +1,13 @@
 /**
- * Context Bridge — ChatGPT Scraper (v5)
+ * Context Bridge — ChatGPT Scraper (v5.0.1)
  * 
- * STRATEGY CHANGE: ChatGPT's internal API (/backend-api/conversations/{id})
- * consistently returns 404 across all fetch contexts (content script, background SW,
- * page-context scripting). The API endpoint has either changed or been restricted.
- * 
- * NEW APPROACH: DOM-based extraction. We read messages directly from the page DOM
- * using ChatGPT's data attributes. This works regardless of API changes because
- * we capture what the user can actually see on screen.
- * 
+ * DOM-based extraction with three critical post-processing passes:
+ *   1. Hidden element filtering — skip display:none, visibility:hidden, opacity:0
+ *   2. Citation artifact removal — strip truncated source chips (text ending in …)
+ *   3. Content deduplication — remove consecutive identical paragraphs
+ *
+ * Also handles non-<table> rendered tables (div-based grids).
+ *
  * ChatGPT message DOM structure (current):
  *   div[data-message-author-role="user"]       → User messages
  *   div[data-message-author-role="assistant"]  → Assistant messages
@@ -22,7 +21,312 @@
 (() => {
   "use strict";
 
-  /* ── DOM-based Conversation Extraction ───────────────────── */
+  /* ═══════════════════════════════════════════════════════════════
+     DOM HELPERS — Visibility, Citation Detection, Table Detection
+     ═══════════════════════════════════════════════════════════════ */
+
+  /**
+   * Check if an element is visually hidden.
+   * ChatGPT leaves streaming artifacts and superseded content in the DOM
+   * with display:none or visibility:hidden. We must skip these.
+   */
+  function isHiddenElement(el) {
+    try {
+      const style = window.getComputedStyle(el);
+      if (style.display === "none") return true;
+      if (style.visibility === "hidden") return true;
+      if (parseFloat(style.opacity) === 0) return true;
+    } catch (e) {
+      // getComputedStyle can throw on detached nodes — treat as hidden
+      return true;
+    }
+    return false;
+  }
+
+  /**
+   * Check if an element or its text is a ChatGPT citation/source artifact.
+   * These appear as clickable chips with truncated filenames like:
+   *   "claude-i-found-this-order-proce…"
+   * They are NOT part of the assistant's actual response text.
+   *
+   * Detection heuristics:
+   *   - Text ends with the Unicode ellipsis character … (U+2026)
+   *   - Element is inside a citation/source annotation container
+   *   - Element is a <sup> tag (ChatGPT wraps citations in superscript)
+   */
+  function isCitationElement(el) {
+    const tag = el.tagName.toLowerCase();
+
+    // ChatGPT wraps citation references in <sup> tags
+    if (tag === "sup") return true;
+
+    // Check for citation-specific class names or data attributes
+    const cls = el.className || "";
+    if (typeof cls === "string") {
+      if (cls.includes("citation") || cls.includes("source-attribution")) return true;
+      if (cls.includes("token") && cls.includes("citation")) return true;
+    }
+
+    // Check data attributes that ChatGPT uses for citations
+    if (el.hasAttribute("data-citation") || el.hasAttribute("data-source")) return true;
+
+    return false;
+  }
+
+  /**
+   * Check if a text string looks like a citation artifact.
+   * Citation chips typically show truncated filenames ending with …
+   */
+  function isCitationText(text) {
+    const trimmed = text.trim();
+    if (!trimmed) return false;
+
+    // Text ending with Unicode ellipsis (U+2026) — almost always a citation chip
+    if (trimmed.endsWith("\u2026")) return true;
+
+    // Text ending with three dots that looks like a truncated filename
+    if (trimmed.endsWith("...") && trimmed.length < 60) {
+      // Check if it looks like a filename (contains dashes, dots, no spaces)
+      if (!trimmed.includes(" ") && (trimmed.includes("-") || trimmed.includes("."))) {
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  /**
+   * Remove citation artifacts from extracted text content.
+   * Handles both the ellipsis-formatted chips and any residual
+   * "claude-i-found-this…" fragments that slip through.
+   */
+  function removeCitationArtifacts(text) {
+    // Remove lines that are just citation artifacts
+    const lines = text.split("\n");
+    const cleaned = lines.filter(line => {
+      const trimmed = line.trim();
+      // Skip empty lines
+      if (!trimmed) return true;
+      // Skip citation artifact lines
+      if (isCitationText(trimmed)) return false;
+      // Skip lines that are ONLY a citation fragment (no other content)
+      if (/^\s*\S+\u2026\s*$/.test(trimmed)) return false;
+      return true;
+    });
+    return cleaned.join("\n");
+  }
+
+  /**
+   * Deduplicate consecutive identical paragraphs.
+   * During streaming, ChatGPT's DOM may contain the same paragraph twice
+   * (the "current" version and the "previous" version before the update).
+   * After extraction, we detect and remove these duplicates.
+   */
+  function deduplicateContent(text) {
+    // Split into paragraphs (by double newline or single newline)
+    const paragraphs = text.split(/\n+/);
+    const deduped = [];
+
+    for (let i = 0; i < paragraphs.length; i++) {
+      const current = paragraphs[i].trim();
+      if (!current) {
+        deduped.push("");
+        continue;
+      }
+
+      // Check if this paragraph is identical to the previous non-empty one
+      const prev = deduped.length > 0 ? deduped[deduped.length - 1].trim() : null;
+      if (prev === current) {
+        // Identical consecutive paragraph — skip it
+        continue;
+      }
+
+      deduped.push(current);
+    }
+
+    // Rejoin with single newlines (preserve structure)
+    return deduped.join("\n");
+  }
+
+  /**
+   * Clean and post-process extracted content.
+   * Pipeline: citation removal → deduplication → whitespace cleanup
+   */
+  function cleanExtractedContent(text) {
+    let cleaned = removeCitationArtifacts(text);
+    cleaned = deduplicateContent(cleaned);
+
+    // Collapse 3+ consecutive newlines into 2 (paragraph break)
+    cleaned = cleaned.replace(/\n{3,}/g, "\n\n");
+
+    // Remove trailing whitespace from each line
+    cleaned = cleaned.split("\n").map(line => line.trimEnd()).join("\n");
+
+    return cleaned.trim();
+  }
+
+  /* ═══════════════════════════════════════════════════════════════
+     DIV-BASED TABLE DETECTION
+     ═══════════════════════════════════════════════════════════════ */
+
+  /**
+   * Check if a div element is actually a table rendered with divs.
+   * ChatGPT sometimes renders tables using divs with specific patterns:
+   *   - Grid/flex layout with consistent column structure
+   *   - Role="table" or aria attributes
+   *   - Multiple child divs that each contain the same number of text segments
+   */
+  function isDivTable(el) {
+    const tag = el.tagName.toLowerCase();
+    if (tag === "table") return true;
+
+    // Check for explicit table role
+    if (el.getAttribute("role") === "table" || el.getAttribute("role") === "grid") return true;
+    if (el.hasAttribute("data-table") || el.hasAttribute("aria-rowcount")) return true;
+
+    // Check class names that suggest table rendering
+    const cls = el.className || "";
+    if (typeof cls === "string" && (
+      cls.includes("table") ||
+      cls.includes("datagrid") ||
+      cls.includes("spreadsheet")
+    )) {
+      return true;
+    }
+
+    // For div-based tables: check if direct children form a grid-like pattern
+    // with consistent column count (at least 2 columns, at least 2 rows)
+    if (tag === "div") {
+      const children = Array.from(el.children);
+      if (children.length < 2) return false;
+
+      // Check if children have role="row" or if grandchildren have role="cell/columnheader"
+      const hasRowRoles = children.some(c =>
+        c.getAttribute("role") === "row" || c.getAttribute("role") === "rowgroup"
+      );
+      if (hasRowRoles) return true;
+
+      // Check if this div contains a nested table
+      if (el.querySelector("table")) return false; // real table inside, not a div table
+
+      // Check for a pattern of consistent inner text segments across children
+      // (heuristic: each child has similar number of text-bearing nodes)
+      const childTextCounts = children.map(c => {
+        // Count distinct text segments (separated by tags, not just whitespace)
+        const walker = document.createTreeWalker(c, NodeFilter.SHOW_TEXT, {
+          acceptNode: (node) => {
+            if (node.textContent.trim()) return NodeFilter.FILTER_ACCEPT;
+            return NodeFilter.FILTER_REJECT;
+          }
+        });
+        let count = 0;
+        while (walker.nextNode()) count++;
+        return count;
+      });
+
+      // If at least 2 children have the same number of text segments (≥2), it might be a table
+      const segmentCounts = childTextCounts.filter(c => c >= 2);
+      if (segmentCounts.length >= 2) {
+        // Check if the majority share the same count
+        const counts = new Map();
+        for (const c of segmentCounts) {
+          counts.set(c, (counts.get(c) || 0) + 1);
+        }
+        for (const [count, freq] of counts) {
+          if (freq >= segmentCounts.length * 0.6 && segmentCounts.length >= 2) {
+            return true;
+          }
+        }
+      }
+    }
+
+    return false;
+  }
+
+  /**
+   * Extract a div-based table as markdown.
+   * Treats each direct child div as a row and text segments within as columns.
+   */
+  function extractDivTable(container) {
+    const children = Array.from(container.children).filter(c => !isHiddenElement(c));
+    if (children.length < 2) return null;
+
+    const rows = [];
+
+    for (const child of children) {
+      const cells = [];
+      // For each row child, get distinct text segments
+      const textSegments = extractTextSegments(child);
+      if (textSegments.length > 0) {
+        cells.push(...textSegments);
+      }
+      if (cells.length > 0) {
+        rows.push(cells);
+      }
+    }
+
+    if (rows.length < 2) return null;
+
+    // Normalize column count to the maximum found
+    const maxCols = Math.max(...rows.map(r => r.length));
+    if (maxCols < 2) return null;
+
+    // Build markdown table
+    let md = "";
+    rows.forEach((row, i) => {
+      // Pad row to maxCols
+      while (row.length < maxCols) row.push("");
+      md += "| " + row.map(c => c.trim()).join(" | ") + " |\n";
+      if (i === 0) {
+        md += "| " + Array.from({ length: maxCols }, () => "---").join(" | ") + " |\n";
+      }
+    });
+
+    return md + "\n";
+  }
+
+  /**
+   * Extract distinct text segments from an element.
+   * Used for div-based table cell extraction.
+   */
+  function extractTextSegments(el) {
+    const segments = [];
+    const children = el.children;
+
+    if (children.length === 0) {
+      const text = (el.textContent || "").trim();
+      if (text) segments.push(text);
+      return segments;
+    }
+
+    for (const child of children) {
+      if (isHiddenElement(child)) continue;
+      if (isCitationElement(child)) continue;
+
+      const tag = child.tagName.toLowerCase();
+
+      // Recursively extract from nested divs (but not too deep)
+      if (tag === "div" && !child.querySelector("div")) {
+        const text = (child.textContent || "").trim();
+        if (text) segments.push(text);
+      } else if (tag === "span" || tag === "p" || tag === "strong" || tag === "em" || tag === "code" || tag === "b") {
+        const text = (child.textContent || "").trim();
+        if (text) segments.push(text);
+      } else if (tag === "pre") {
+        // Code block inside table cell — skip for now
+        continue;
+      } else {
+        const text = (child.textContent || "").trim();
+        if (text) segments.push(text);
+      }
+    }
+
+    return segments;
+  }
+
+  /* ═══════════════════════════════════════════════════════════════
+     DOM-BASED CONVERSATION EXTRACTION
+     ═══════════════════════════════════════════════════════════════ */
 
   function scrapeFromDOM() {
     console.log("[CB] ChatGPT: Starting DOM-based extraction...");
@@ -75,7 +379,9 @@
     };
   }
 
-  /* ── Extract text content from a message element ────────── */
+  /* ═══════════════════════════════════════════════════════════════
+     EXTRACT TEXT CONTENT FROM A MESSAGE ELEMENT
+     ═══════════════════════════════════════════════════════════════ */
 
   function extractMessageContent(messageEl) {
     // Strategy 1: Find .markdown content area
@@ -111,17 +417,23 @@
     return text || "";
   }
 
-  /* ── Extract content preserving code blocks ─────────────── */
+  /* ═══════════════════════════════════════════════════════════════
+     EXTRACT CONTENT PRESERVING CODE BLOCKS & TABLES
+     ═══════════════════════════════════════════════════════════════ */
 
   function extractMarkdownContent(container) {
     let result = "";
     const children = container.children;
 
     if (children.length === 0) {
-      return container.innerText || container.textContent || "";
+      const text = container.innerText || container.textContent || "";
+      return cleanExtractedContent(text);
     }
 
     for (const child of children) {
+      // Skip hidden elements — these are streaming artifacts or superseded content
+      if (isHiddenElement(child)) continue;
+
       const tag = child.tagName.toLowerCase();
 
       // Code blocks
@@ -137,6 +449,18 @@
       }
       // Paragraphs and text blocks
       else if (tag === "p" || tag === "div" || tag === "span" || tag === "li") {
+        // Skip citation elements
+        if (isCitationElement(child)) continue;
+
+        // Check if this is a div-based table
+        if (tag === "div" && isDivTable(child)) {
+          const tableMd = extractDivTable(child);
+          if (tableMd) {
+            result += tableMd;
+            continue;
+          }
+        }
+
         // Check if this contains nested code blocks we should handle separately
         const nestedPre = child.querySelectorAll("pre");
         if (nestedPre.length > 0) {
@@ -144,7 +468,11 @@
         } else {
           const text = child.innerText || child.textContent || "";
           if (text.trim()) {
-            result += text.trim() + "\n\n";
+            // Clean individual text block for citation artifacts
+            const cleanedText = removeCitationArtifacts(text.trim());
+            if (cleanedText.trim()) {
+              result += cleanedText.trim() + "\n\n";
+            }
           }
         }
       }
@@ -152,8 +480,12 @@
       else if (tag === "ul" || tag === "ol") {
         const items = child.querySelectorAll("li");
         items.forEach(li => {
+          if (isHiddenElement(li)) return;
           const text = li.innerText || li.textContent || "";
-          result += "- " + text.trim() + "\n";
+          const cleaned = removeCitationArtifacts(text.trim());
+          if (cleaned) {
+            result += "- " + cleaned + "\n";
+          }
         });
         result += "\n";
       }
@@ -163,16 +495,22 @@
         const text = child.innerText || child.textContent || "";
         result += "#".repeat(level) + " " + text.trim() + "\n\n";
       }
-      // Tables
+      // Tables (native <table> elements)
       else if (tag === "table") {
         result += extractTable(child);
       }
-      // Links — just get the text
+      // Links — just get the text (skip citation links)
       else if (tag === "a") {
-        result += child.textContent || "";
+        if (!isCitationElement(child)) {
+          const linkText = child.textContent || "";
+          if (!isCitationText(linkText)) {
+            result += linkText;
+          }
+        }
       }
       // Everything else
       else {
+        if (isCitationElement(child)) continue;
         const text = child.innerText || child.textContent || "";
         if (text.trim()) {
           result += text.trim() + "\n\n";
@@ -180,10 +518,13 @@
       }
     }
 
-    return result.trim();
+    // Final cleanup pass: deduplicate + normalize whitespace
+    return cleanExtractedContent(result);
   }
 
-  /* ── Extract table as markdown ───────────────────────────── */
+  /* ═══════════════════════════════════════════════════════════════
+     EXTRACT TABLE AS MARKDOWN
+     ═══════════════════════════════════════════════════════════════ */
 
   function extractTable(tableEl) {
     const rows = tableEl.querySelectorAll("tr");
@@ -192,7 +533,13 @@
     let md = "";
     rows.forEach((row, i) => {
       const cells = row.querySelectorAll("th, td");
-      const rowText = Array.from(cells).map(c => (c.innerText || c.textContent || "").trim()).join(" | ");
+      const rowText = Array.from(cells)
+        .map(c => {
+          const text = (c.innerText || c.textContent || "").trim();
+          // Clean citation artifacts from table cells
+          return removeCitationArtifacts(text);
+        })
+        .join(" | ");
       md += "| " + rowText + " |\n";
       if (i === 0) {
         md += "| " + Array.from(cells).map(() => "---").join(" | ") + " |\n";
@@ -201,7 +548,9 @@
     return md + "\n";
   }
 
-  /* ── Detect language from code element classes ───────────── */
+  /* ═══════════════════════════════════════════════════════════════
+     DETECT LANGUAGE FROM CODE ELEMENT CLASSES
+     ═══════════════════════════════════════════════════════════════ */
 
   function detectLanguageFromClasses(className) {
     if (!className) return "";
@@ -209,7 +558,9 @@
     return match ? match[1] : "";
   }
 
-  /* ── Get conversation title ─────────────────────────────── */
+  /* ═══════════════════════════════════════════════════════════════
+     GET CONVERSATION TITLE
+     ═══════════════════════════════════════════════════════════════ */
 
   function getConversationTitle() {
     // Method 1: Page title (usually "conversation title | ChatGPT")
@@ -231,7 +582,9 @@
     return null;
   }
 
-  /* ── Fallback: Alternative DOM selectors ─────────────────── */
+  /* ═══════════════════════════════════════════════════════════════
+     FALLBACK: ALTERNATIVE DOM SELECTORS
+     ═══════════════════════════════════════════════════════════════ */
 
   function scrapeFromDOMFallback(title) {
     console.log("[CB] ChatGPT DOM: Trying fallback selectors...");
@@ -252,6 +605,9 @@
 
       const messages = [];
       for (const el of elements) {
+        // Skip hidden elements
+        if (isHiddenElement(el)) continue;
+
         // Try to determine role from context
         const isUser = el.querySelector('[data-message-author-role="user"]') ||
                        el.querySelector(".avatar")?.closest("[class*='flex']")?.querySelector(".text-sm") ||
@@ -264,9 +620,12 @@
         if (content.trim().length < 5) continue;
         if (["Copy", "Share", "Regenerate", "Edit", "Like", "Dislike"].includes(content.trim())) continue;
 
+        // Apply citation cleanup to fallback content too
+        const cleanedContent = cleanExtractedContent(content.trim());
+
         messages.push({
           role: isUser ? "user" : "assistant",
-          content: content.trim(),
+          content: cleanedContent,
           timestamp: null
         });
       }
@@ -298,7 +657,7 @@
           model: "ChatGPT",
           messages: [{
             role: "assistant",
-            content: text.trim(),
+            content: cleanExtractedContent(text.trim()),
             timestamp: null
           }],
           platform: "chatgpt",
@@ -319,7 +678,9 @@
     };
   }
 
-  /* ── API-based Fallback (last resort) ────────────────────── */
+  /* ═══════════════════════════════════════════════════════════════
+     API-BASED FALLBACK (LAST RESORT)
+     ═══════════════════════════════════════════════════════════════ */
 
   async function fetchFromAPI() {
     const convId = CBCommon.getConversationId();
@@ -412,8 +773,9 @@
     };
   }
 
-  /* ── Main Capture Flow ───────────────────────────────────── */
-  // DOM first (reliable), API second (may fail with 404)
+  /* ═══════════════════════════════════════════════════════════════
+     MAIN CAPTURE FLOW
+     ═══════════════════════════════════════════════════════════════ */
 
   async function captureConversation() {
     // Try DOM scraping first
@@ -454,7 +816,9 @@
     );
   }
 
-  /* ── Message Listener (from popup) ──────────────────────── */
+  /* ═══════════════════════════════════════════════════════════════
+     MESSAGE LISTENER (FROM POPUP)
+     ═══════════════════════════════════════════════════════════════ */
 
   chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     if (msg.target !== "content-chatgpt") return;
@@ -488,5 +852,5 @@
     }
   });
 
-  console.log("[Context Bridge v5] ChatGPT scraper loaded (DOM-first mode).");
+  console.log("[Context Bridge v5.0.1] ChatGPT scraper loaded (DOM-first + citation filter + dedup).");
 })();
