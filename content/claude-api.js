@@ -165,12 +165,31 @@
       // Claude stores user-uploaded files in msg.attachments[] with:
       //   { id, file_name, file_size, file_type, extracted_content }
       // The actual file text is in extracted_content (already decoded by Claude).
+      // Large attachments (>50 lines) are wrapped in collapsible <details> to keep the export readable.
+      // Code files are fenced with language detection from the filename extension.
       if (Array.isArray(msg.attachments) && msg.attachments.length > 0) {
         for (const att of msg.attachments) {
           if (att.extracted_content) {
-            // Claude already extracted the text content — use it directly
-            const displayName = att.file_name || `Uploaded file (${att.file_type || "unknown"})`;
-            textParts.push(`📎 **${displayName}** (${att.file_type || "unknown"}, ${att.file_size || "?"} bytes)\n\n${att.extracted_content}`);
+            const displayName = att.file_name || "Uploaded file";
+            const lang = CBCommon.detectLangFromPath(att.file_name);
+            const sizeLabel = att.file_size ? `${(att.file_size / 1024).toFixed(1)} KB` : `${att.extracted_content.length} chars`;
+            const lines = att.extracted_content.split("\n");
+
+            if (lines.length > 50) {
+              // Large file — collapsible to avoid wall-of-text
+              textParts.push(
+                `📎 **${displayName}** (${sizeLabel})\n\n` +
+                `<details>\n<summary>Expand to view full file (${lines.length} lines)</summary>\n\n` +
+                `\`\`\`${lang}\n${att.extracted_content}\n\`\`\`\n\n` +
+                `</details>`
+              );
+            } else {
+              // Small file — show inline with code fence
+              const fenced = lang
+                ? `\`\`\`${lang}\n${att.extracted_content}\n\`\`\``
+                : att.extracted_content;
+              textParts.push(`📎 **${displayName}** (${sizeLabel})\n\n${fenced}`);
+            }
           } else if (att.file_name) {
             // Attachment exists but no extracted content (binary, image, etc.)
             textParts.push(`📎 **${att.file_name}** (${att.file_type || "unknown"}, ${att.file_size || "?"} bytes)`);
@@ -256,8 +275,9 @@
                 const typeLabel = fileType ? ` (${fileType})` : "";
 
                 if (fileSource.type === "text" && fileSource.data) {
-                  // Inline text content — render in a fenced code block
-                  textParts.push(`📎 **${fileName}**${typeLabel}\n\n\`\`\`\n${fileSource.data}\n\`\`\``);
+                  // Inline text content — render in a fenced code block with lang detection
+                  const lang = CBCommon.detectLangFromPath(fileName);
+                  textParts.push(`📎 **${fileName}**${typeLabel}\n\n\`\`\`${lang}\n${fileSource.data}\n\`\`\``);
 
                 } else if (fileSource.type === "base64" && fileSource.data) {
                   // Binary / image — can't inline the bytes, note it was attached
@@ -271,10 +291,13 @@
                   textParts.push(`📎 **${fileName}**${typeLabel}${idNote}`);
 
                 } else if (block.content) {
-                  textParts.push(`📎 **${fileName}**${typeLabel}\n\n\`\`\`\n${block.content}\n\`\`\``);
+                  const lang = CBCommon.detectLangFromPath(fileName);
+                  textParts.push(`📎 **${fileName}**${typeLabel}\n\n\`\`\`${lang}\n${block.content}\n\`\`\``);
 
                 } else if (block.text) {
-                  textParts.push(`📎 **${fileName}**\n\n${block.text}`);
+                  // Fallback text — fence it too
+                  const lang = CBCommon.detectLangFromPath(fileName);
+                  textParts.push(`📎 **${fileName}**\n\n\`\`\`${lang}\n${block.text}\n\`\`\``);
 
                 } else {
                   // Last resort — at minimum show the file name
