@@ -1,5 +1,5 @@
 /**
- * Context Bridge — ChatGPT Scraper (v4.0.4)
+ * Context Bridge — ChatGPT Scraper (v5)
  * 
  * STRATEGY CHANGE: ChatGPT's internal API (/backend-api/conversations/{id})
  * consistently returns 404 across all fetch contexts (content script, background SW,
@@ -488,5 +488,5 @@
     }
   });
 
-  console.log("[Context Bridge v4.0.4] ChatGPT scraper loaded (DOM-first mode).");
+  console.log("[Context Bridge v5] ChatGPT scraper loaded (DOM-first mode).");
 })();

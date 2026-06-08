@@ -1,5 +1,5 @@
 /**
- * Context Bridge — Z.ai Scraper (v4.1)
+ * Context Bridge — Z.ai Scraper (v5)
  * Fetches conversation data from Z.ai's internal REST API.
  * Falls back to DOM scraping when the API lazy-loads content (returns skeleton nodes only).
  *
@@ -675,5 +675,5 @@
     }
   });
 
-  console.log("[Context Bridge v4.1] Z.ai scraper loaded (API + DOM fallback).");
+  console.log("[Context Bridge v5] Z.ai scraper loaded (API + DOM fallback).");
 })();

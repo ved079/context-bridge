@@ -436,5 +436,5 @@
     }
   });
 
-  console.log("[Context Bridge v4.2] Claude API scraper loaded.");
+  console.log("[Context Bridge v5] Claude API scraper loaded.");
 })();

@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Context Bridge",
-  "version": "4.1",
+  "version": "5.0",
   "description": "Capture AI conversations from Claude, ChatGPT & Z.ai via internal APIs — clean exports in Markdown and JSON.",
   "permissions": [
     "storage",

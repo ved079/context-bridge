@@ -1,5 +1,5 @@
 /**
- * Context Bridge — Background Service Worker (v4.0.3)
+ * Context Bridge — Background Service Worker (v5)
  * 
  * Responsibilities:
  * 1. Fetch ChatGPT conversations (bypasses page-level Service Worker interception)
@@ -394,7 +394,7 @@ async function fetchViaDOM(convId) {
 /* ── Init ────────────────────────────────────────────────────── */
 
 chrome.runtime.onInstalled.addListener(() => {
-  console.log("[Context Bridge v4.0.3] Extension installed/updated.");
+  console.log("[Context Bridge v5] Extension installed/updated.");
 });
 
-console.log("[Context Bridge v4.0.3] Background service worker started.");
+console.log("[Context Bridge v5] Background service worker started.");
