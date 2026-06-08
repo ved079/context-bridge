@@ -1,1 +1,22 @@
+# Test uploads and exports
 upload/
+download/
+
+# Session worklogs
+worklog.md
+
+# Other projects — never track in this repo
+RhythmErp_Automation/
+
+# Branch copies / duplicate repos
+cb-clean/
+cb-pull/
+context-bridge/
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
