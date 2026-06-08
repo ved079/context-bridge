@@ -28,3 +28,32 @@ Stage Summary:
 - Commit 039c86e is ready, needs user to push from their local machine
 - All tests passed, no breaking changes, same public API
 - 7 files changed: 195 insertions, 83 deletions
+---
+Task ID: 2
+Agent: main
+Task: Fix ChatGPT export — citation artifacts, duplicate content, broken tables
+
+Work Log:
+- Analyzed exported .md files from both Claude and ChatGPT platforms
+- Identified 3 root causes in content/chatgpt-api.js DOM extraction:
+  1. Citation chips (text ending in … / U+2026) leaking into exports as 12+ orphaned fragments
+  2. Streaming artifacts — hidden/superseded DOM elements producing consecutive duplicate paragraphs
+  3. Non-<table> rendered tables losing pipe formatting when captured via innerText fallback
+- Implemented isHiddenElement() — checks computed style for display:none, visibility:hidden, opacity:0
+- Implemented isCitationElement() / isCitationText() — detects <sup> wrappers, citation classes, ellipsis text
+- Implemented removeCitationArtifacts() — line-level filter for citation fragments
+- Implemented deduplicateContent() — removes consecutive identical paragraphs
+- Implemented cleanExtractedContent() — pipeline: citation removal → dedup → whitespace normalization
+- Implemented isDivTable() / extractDivTable() — detects and extracts div-based tables via role/class/heuristics
+- Updated extractMarkdownContent() to skip hidden elements, skip citation elements, detect div tables
+- Updated extractTable() to clean citation artifacts from table cells
+- Updated fallback extractors to apply cleanExtractedContent
+- Resolved rebase conflict with remote (v5 redesign commit), kept v5.0.1 changes
+- Verified: claude-api.js untouched (0 diff), all 7 JS files pass syntax check
+- Pushed as dc9bc6f on main
+
+Stage Summary:
+- Single file changed: content/chatgpt-api.js (+395, -31)
+- Version bumped to v5.0.1
+- Claude scraper untouched — no regressions possible
+- Three critical post-processing passes now run on all ChatGPT DOM extractions
