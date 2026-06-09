@@ -211,6 +211,7 @@
       // ── 3. Parse content blocks from msg.content ──
       const tools = [];
       const toolResults = [];
+      const thinkingParts = [];
 
       if (Array.isArray(contentBlocks) && contentBlocks.length > 0) {
         // Structured content blocks (API format)
@@ -240,7 +241,10 @@
 
             case "thinking":
               // Claude's thinking block (extended thinking mode)
-              // Skip thinking — it's internal reasoning, not visible content
+              // Capture it — senior wants to see the reasoning chain
+              if (block.text && block.text.trim()) {
+                thinkingParts.push(block.text.trim());
+              }
               break;
 
             case "document":
@@ -330,6 +334,7 @@
       }
       if (tools.length > 0) parsed.tools = tools;
       if (toolResults.length > 0) parsed.toolResults = toolResults;
+      if (thinkingParts.length > 0) parsed.thinking = thinkingParts.join("\n\n").trim();
 
       // Only include messages that have actual content or tools
       if (parsed.content || (parsed.tools && parsed.tools.length > 0)) {
