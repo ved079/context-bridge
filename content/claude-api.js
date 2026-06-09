@@ -241,8 +241,10 @@
 
             case "thinking":
               // Claude's thinking block (extended thinking mode)
-              // Capture it — senior wants to see the reasoning chain
-              if (block.text && block.text.trim()) {
+              // Standard API uses block.thinking, some internal formats use block.text
+              if (block.thinking && block.thinking.trim()) {
+                thinkingParts.push(block.thinking.trim());
+              } else if (block.text && block.text.trim()) {
                 thinkingParts.push(block.text.trim());
               }
               break;
