@@ -216,6 +216,11 @@
       if (Array.isArray(contentBlocks) && contentBlocks.length > 0) {
         // Structured content blocks (API format)
         for (const block of contentBlocks) {
+          // Debug: log every block type and its keys (helps diagnose missing thinking)
+          if (block.type === 'thinking') {
+            console.log(`[CB] Claude: FOUND thinking block — keys: [${Object.keys(block).join(', ')}]`);
+          }
+
           switch (block.type) {
             case "text":
               if (block.text) textParts.push(block.text);
@@ -241,11 +246,19 @@
 
             case "thinking":
               // Claude's thinking block (extended thinking mode)
-              // Standard API uses block.thinking, some internal formats use block.text
-              if (block.thinking && block.thinking.trim()) {
-                thinkingParts.push(block.thinking.trim());
-              } else if (block.text && block.text.trim()) {
-                thinkingParts.push(block.text.trim());
+              // Standard Anthropic API: block.thinking
+              // Claude.ai internal API may use different field names
+              const thinkText = block.thinking || block.text || block.content || block.summary || "";
+              if (typeof thinkText === "string" && thinkText.trim()) {
+                thinkingParts.push(thinkText.trim());
+                console.log(`[CB] Claude: Captured thinking (${thinkText.length} chars)`);
+              } else if (block.encrypted_thinking || block.signature) {
+                // Encrypted thinking — Claude.ai internal API may return this
+                // We can't read the encrypted content, but log it for diagnosis
+                console.log(`[CB] Claude: Thinking is encrypted (signature: ${String(block.signature).slice(0, 20)}...)`);
+              } else {
+                // Log unknown thinking block structure for debugging
+                console.log(`[CB] Claude: Empty thinking block, full keys: ${JSON.stringify(Object.keys(block))}`);
               }
               break;
 
@@ -336,7 +349,10 @@
       }
       if (tools.length > 0) parsed.tools = tools;
       if (toolResults.length > 0) parsed.toolResults = toolResults;
-      if (thinkingParts.length > 0) parsed.thinking = thinkingParts.join("\n\n").trim();
+      if (thinkingParts.length > 0) {
+        parsed.thinking = thinkingParts.join("\n\n").trim();
+        console.log(`[CB] Claude: Message has thinking (${parsed.thinking.length} chars)`);
+      }
 
       // Only include messages that have actual content or tools
       if (parsed.content || (parsed.tools && parsed.tools.length > 0)) {
@@ -347,6 +363,16 @@
     // Clean up: merge consecutive assistant messages that don't have separate tool boundaries
     // (Sometimes the API splits a single response into multiple messages)
     const merged = mergeConsecutiveAssistantMessages(messages);
+
+    // Check if API returned any thinking blocks
+    const hasThinking = merged.some(m => m.thinking);
+    if (!hasThinking) {
+      console.log("[CB] Claude: No thinking from API — trying DOM fallback...");
+      const domThinkings = scrapeThinkingFromDOM();
+      if (domThinkings.length > 0) {
+        mergeDOMThinking(merged, domThinkings);
+      }
+    }
 
     return {
       title,
@@ -421,14 +447,115 @@
         !current.tools &&
         !current.toolResults
       ) {
-        // Merge into previous
+        // Merge into previous — also merge thinking if both have it
         prev.content = (prev.content + "\n\n" + current.content).trim();
+        if (current.thinking && !prev.thinking) {
+          prev.thinking = current.thinking;
+        }
       } else {
         merged.push({ ...current });
       }
     }
 
     return merged;
+  }
+
+  /* ═══════════════════════════════════════════════════════════════
+     DOM FALLBACK — Extract thinking blocks from the page
+     ═══════════════════════════════════════════════════════════════ */
+
+  /**
+   * If the API didn't return thinking blocks, try scraping them from the DOM.
+   * Claude.ai renders thinking in collapsible sections the user can expand.
+   * Multiple strategies to find the hidden thinking content.
+   */
+  function scrapeThinkingFromDOM() {
+    console.log("[CB] Claude: Trying DOM fallback for thinking blocks...");
+    const thinkingTexts = [];
+
+    // Strategy 1: Find "Thought for" elements, walk up to find content container
+    const allElements = document.querySelectorAll("*");
+    for (const el of allElements) {
+      if (el.children.length > 3) continue;
+      const text = el.textContent || "";
+      if (text.length > 200) continue;
+      if (/Thought for\s+\d/i.test(text)) {
+        console.log("[CB] Claude: Found 'Thought for' element:", el.tagName, (el.className || "").slice(0, 40));
+        let container = el.parentElement;
+        for (let depth = 0; depth < 6; depth++) {
+          if (!container) break;
+          const fullText = container.innerText || container.textContent || "";
+          const thinkingContent = fullText.replace(/Thought for\s+[\d\smsmih.:]+(?:\.\s*)?/gi, "").trim();
+          if (thinkingContent.length > 50) {
+            thinkingTexts.push(thinkingContent);
+            console.log("[CB] Claude: DOM thinking extracted (" + thinkingContent.length + " chars)");
+            break;
+          }
+          container = container.parentElement;
+        }
+      }
+    }
+
+    // Strategy 2: Turn-based — find thinking before .font-claude-response
+    const turns = document.querySelectorAll("[data-test-render-count]");
+    for (const turn of turns) {
+      const turnText = turn.textContent || "";
+      if (/Thought for/i.test(turnText)) {
+        const responseEl = turn.querySelector(".font-claude-response") || turn.querySelector(".font-claude-message");
+        if (responseEl) {
+          const prevSibs = [];
+          let sib = responseEl.previousElementSibling;
+          while (sib) { prevSibs.unshift(sib); sib = sib.previousElementSibling; }
+          for (const s of prevSibs) {
+            const t = (s.innerText || s.textContent || "").trim();
+            if (t.length > 50) {
+              thinkingTexts.push(t);
+              console.log("[CB] Claude: DOM thinking from sibling (" + t.length + " chars)");
+            }
+          }
+        }
+      }
+    }
+
+    // Strategy 3: Find thinking toggle buttons
+    const buttons = document.querySelectorAll("button, [role='button']");
+    for (const btn of buttons) {
+      const btnText = (btn.textContent || "").trim().toLowerCase();
+      if (btnText.includes("thinking") || btnText.includes("show less")) {
+        const parent = btn.parentElement;
+        if (!parent) continue;
+        for (const sib of parent.children) {
+          if (sib === btn) continue;
+          const sibText = (sib.innerText || sib.textContent || "").trim();
+          const clean = sibText.replace(/Thought for[\s\S]*?(?:\n|$)/i, "").trim();
+          if (clean.length > 100) {
+            thinkingTexts.push(clean);
+            console.log("[CB] Claude: DOM thinking from toggle (" + clean.length + " chars)");
+          }
+        }
+      }
+    }
+
+    console.log("[CB] Claude: DOM fallback found " + thinkingTexts.length + " thinking blocks");
+    return thinkingTexts;
+  }
+
+  /**
+   * Merge DOM-scraped thinking into API-parsed messages by position.
+   */
+  function mergeDOMThinking(messages, domThinkings) {
+    if (domThinkings.length === 0) return messages;
+    let thinkIdx = 0;
+    for (const msg of messages) {
+      if (msg.role !== "assistant") continue;
+      if (msg.thinking) continue;
+      if (thinkIdx < domThinkings.length) {
+        msg.thinking = domThinkings[thinkIdx];
+        thinkIdx++;
+        console.log("[CB] Claude: Merged DOM thinking into msg (" + msg.thinking.length + " chars)");
+      }
+    }
+    return messages;
   }
 
   /* ── Message Listener (from popup) ──────────────────────── */
