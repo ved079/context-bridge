@@ -192,6 +192,7 @@
       // ── 3. Parse content blocks from msg.content ──
       const tools = [];
       const toolResults = [];
+      const thinkingParts = [];
 
       if (Array.isArray(contentBlocks) && contentBlocks.length > 0) {
         // Structured content blocks (API format)
@@ -220,8 +221,15 @@
               break;
 
             case "thinking":
-              // Claude's thinking block (extended thinking mode)
-              // Skip thinking — it's internal reasoning, not visible content
+              // Claude's extended thinking block.
+              // The API returns: { type: "thinking", thinking: "...", start_timestamp, stop_timestamp }
+              // Content lives in block.thinking (NOT block.text).
+              if (block.thinking && block.thinking.trim()) {
+                thinkingParts.push(block.thinking.trim());
+              } else if (block.text && block.text.trim()) {
+                // Fallback for potential future format changes
+                thinkingParts.push(block.text.trim());
+              }
               break;
 
             case "document":
@@ -307,9 +315,10 @@
       }
       if (tools.length > 0) parsed.tools = tools;
       if (toolResults.length > 0) parsed.toolResults = toolResults;
+      if (thinkingParts.length > 0) parsed.thinking = thinkingParts.join("\n\n").trim();
 
-      // Only include messages that have actual content or tools
-      if (parsed.content || (parsed.tools && parsed.tools.length > 0)) {
+      // Only include messages that have actual content, tools, or thinking
+      if (parsed.content || (parsed.tools && parsed.tools.length > 0) || parsed.thinking) {
         messages.push(parsed);
       }
     }
@@ -389,7 +398,9 @@
         current.role === "assistant" &&
         !prev.tools &&
         !current.tools &&
-        !current.toolResults
+        !current.toolResults &&
+        !prev.thinking &&
+        !current.thinking
       ) {
         // Merge into previous
         prev.content = (prev.content + "\n\n" + current.content).trim();
@@ -436,5 +447,5 @@
     }
   });
 
-  console.log("[Context Bridge v4.2] Claude API scraper loaded.");
+  console.log("[Context Bridge v5] Claude API scraper loaded (thinking block capture enabled).");
 })();

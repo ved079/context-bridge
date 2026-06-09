@@ -38,10 +38,14 @@ const MarkdownGenerator = (() => {
       if (lastTs) lines.push(`> **Ended**: ${formatDate(lastTs)}`);
     }
 
-    // Count tools
+    // Count tools and thinking blocks
     const totalTools = messages.reduce((n, m) => n + (m.tools ? m.tools.length : 0), 0);
+    const totalThinking = messages.reduce((n, m) => n + (m.thinking ? 1 : 0), 0);
     if (totalTools > 0) {
       lines.push(`> **Tool Calls**: ${totalTools}`);
+    }
+    if (totalThinking > 0) {
+      lines.push(`> **Thinking Blocks**: ${totalThinking}`);
     }
 
     lines.push("");
@@ -56,13 +60,29 @@ const MarkdownGenerator = (() => {
       lines.push(`## ${label}${time}`);
       lines.push("");
 
+      // Thinking blocks (shown as collapsible details)
+      if (msg.thinking) {
+        const thinkLines = msg.thinking.split("\n");
+ lines.push(`<details>`);
+        lines.push(`<summary>💭 Thinking (${thinkLines.length} lines)</summary>`);
+        lines.push("");
+        lines.push(msg.thinking);
+        lines.push("");
+        lines.push(`</details>`);
+        lines.push("");
+      }
+
       // Text content
       if (msg.content) {
         lines.push(msg.content);
         lines.push("");
       } else if (msg.role === "assistant") {
-        lines.push("*[No text response — only tool calls]*");
-        lines.push("");
+        if (msg.thinking) {
+          // Had thinking but no text output — say so
+        } else {
+          lines.push("*[No text response — only tool calls]*");
+          lines.push("");
+        }
       }
 
       // Tool calls (shown as collapsible details)
@@ -165,6 +185,11 @@ const MarkdownGenerator = (() => {
           timestamp: msg.timestamp || null
         };
 
+        // Include thinking for assistant messages
+        if (msg.thinking) {
+          clean.thinking = msg.thinking;
+        }
+
         // Include tools array for assistant messages
         if (msg.tools && msg.tools.length > 0) {
           clean.tools = msg.tools.map((t) => {
@@ -183,9 +208,11 @@ const MarkdownGenerator = (() => {
     };
 
     // Add Context Bridge metadata
-    output.exportedBy = "Context Bridge v4";
+    const thinkingBlocks = messages.reduce((n, m) => n + (m.thinking ? 1 : 0), 0);
+    output.exportedBy = "Context Bridge v5";
     output.repo = "https://github.com/ved079/context-bridge";
     output.exportTimestamp = new Date().toISOString();
+    if (thinkingBlocks > 0) output.thinkingBlocks = thinkingBlocks;
 
     return JSON.stringify(output, null, 2);
   }
@@ -303,7 +330,7 @@ const MarkdownGenerator = (() => {
   <a href="https://github.com/ved079/context-bridge/stargazers"><img src="https://img.shields.io/github/stars/ved079/context-bridge?style=social" alt="Stars"/></a>
 </p>
 
-*Exported by Context Bridge v4 (Claude, ChatGPT & Z.ai)*`;
+*Exported by Context Bridge v5 (Claude, ChatGPT & Z.ai)*`;
 
   const FOOTER_COMPACT = `---
 *Captured with [Context Bridge](https://github.com/ved079/context-bridge) — give it a star on GitHub!*`;
